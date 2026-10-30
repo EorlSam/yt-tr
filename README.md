@@ -1,1 +1,1 @@
-# yt-transcript
+# yt-tr
