@@ -16,7 +16,7 @@ A small command-line tool for fetching YouTube transcripts from a video ID or fu
 ```bash
 git clone https://github.com/EorlSam/yt-tr.git
 cd yt-tr
-./install.sh
+bash install.sh
 ```
 
 The installer creates an isolated user virtual environment and installs `yt-tr` in `~/.local/bin`.
