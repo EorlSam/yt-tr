@@ -134,7 +134,7 @@ def main() -> int:
             target = Path(args.output)
         else:
             extension = "srt" if output_format == "srt" else output_format
-            target = Path(f"youtube_transcript_{video_id}.{extension}")
+            target = Path(f"yt-tr_{video_id}.{extension}")
         if target.exists() and not args.force:
             print(f"Error: {target} already exists; use --force to overwrite.", file=sys.stderr)
             return 1
