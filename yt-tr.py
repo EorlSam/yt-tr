@@ -1,12 +1,26 @@
 #!/usr/bin/env python3
-"""Fetch YouTube transcripts with friendly CLI output and file formats."""
+"""Fetch YouTube and Rumble transcripts with friendly CLI output and file formats."""
 
 import argparse
 import json
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
+
+
+@dataclass
+class TranscriptSnippet:
+    text: str
+    start: float
+    duration: float
+
+
+def is_rumble_url(value: str) -> bool:
+    """Return whether value is a Rumble URL."""
+    parsed = urlparse(value)
+    return parsed.scheme in {"http", "https"} and parsed.netloc.lower().split(":", 1)[0].endswith("rumble.com")
 
 
 def video_id_from(value: str) -> str:
@@ -63,12 +77,63 @@ def render(snippets, output_format: str) -> str:
     return "\n".join(blocks)
 
 
+def parse_webvtt(content: str):
+    """Parse the timed text returned by Rumble into transcript snippets."""
+    snippets = []
+    blocks = re.split(r"\r?\n\s*\r?\n", content.lstrip("\ufeff"))
+    for block in blocks:
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        timing_index = next((index for index, line in enumerate(lines) if "-->" in line), None)
+        if timing_index is None or timing_index + 1 >= len(lines):
+            continue
+        start_text, end_text = (part.strip().split(" ", 1)[0] for part in lines[timing_index].split("-->"))
+        try:
+            start = _vtt_time(start_text)
+            end = _vtt_time(end_text)
+        except ValueError:
+            continue
+        text = " ".join(lines[timing_index + 1:])
+        text = re.sub(r"<[^>]+>", "", text)
+        if text:
+            snippets.append(TranscriptSnippet(text, start, max(0, end - start)))
+    return snippets
+
+
+def _vtt_time(value: str) -> float:
+    parts = value.replace(",", ".").split(":")
+    if len(parts) == 2:
+        minutes, seconds = parts
+        return int(minutes) * 60 + float(seconds)
+    if len(parts) == 3:
+        hours, minutes, seconds = parts
+        return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    raise ValueError(value)
+
+
+def fetch_rumble_transcript(url: str, requested):
+    """Fetch a Rumble subtitle track through yt-dlp."""
+    from yt_dlp import YoutubeDL
+
+    with YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True}) as ydl:
+        info = ydl.extract_info(url, download=False)
+        tracks = info.get("subtitles") or info.get("automatic_captions") or {}
+        selected_code = next((code for code in requested if code in tracks), None)
+        if selected_code is None and tracks:
+            selected_code = next(iter(tracks))
+        if selected_code is None:
+            return [], None
+        track = tracks[selected_code]
+        source = next((entry for entry in track if entry.get("ext") == "vtt"), track[0])
+        content = ydl.urlopen(source["url"]).read().decode("utf-8")
+        return parse_webvtt(content), selected_code
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="yt-tr",
-        description="Fetch a YouTube transcript from a video ID or full URL.",
+        description="Fetch a YouTube or Rumble transcript from a video ID or full URL.",
     )
-    parser.add_argument("video", help="YouTube video ID or URL")
+    parser.add_argument("video", help="YouTube video ID, YouTube URL, or Rumble URL")
     parser.add_argument("language_positional", nargs="?", metavar="language", help="Preferred language code")
     parser.add_argument("-l", "--language", dest="languages", action="append", help="Preferred language code; repeatable")
     parser.add_argument("-t", "--timestamps", action="store_true", help="Include timestamps in SRT format")
@@ -83,48 +148,50 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    video_id = video_id_from(args.video)
     requested = list(args.languages or [])
     if args.language_positional:
         requested.insert(0, args.language_positional)
     if not requested:
         requested = ["en"]
 
+    rumble = is_rumble_url(args.video)
+    video_id = args.video if rumble else video_id_from(args.video)
     try:
-        from youtube_transcript_api import YouTubeTranscriptApi
-        transcripts = YouTubeTranscriptApi().list(video_id)
+        if rumble:
+            fetched, selected_code = fetch_rumble_transcript(args.video, requested)
+            available_codes = [selected_code] if selected_code else []
+        else:
+            from youtube_transcript_api import YouTubeTranscriptApi
+            transcripts = YouTubeTranscriptApi().list(video_id)
+            available = list(transcripts)
+            available_codes = [transcript.language_code for transcript in available]
+            if args.list_languages:
+                if not available:
+                    print("No transcripts are available.")
+                    return 0
+                for transcript in available:
+                    kind = "generated" if transcript.is_generated else "manual"
+                    print(f"{transcript.language_code}\t{transcript.language}\t{kind}")
+                return 0
+            selected = next((transcript for code in requested for transcript in available if transcript.language_code == code), None)
+            if selected is None and available:
+                selected = available[0]
+                if not args.quiet:
+                    print(f"Requested language(s) {', '.join(requested)} unavailable; using {selected.language_code}.", file=sys.stderr)
+            if selected is None:
+                fetched = []
+            else:
+                fetched = selected.fetch(preserve_formatting=True)
+        if args.list_languages:
+            for code in available_codes:
+                print(code)
+            return 0
     except Exception as exc:
         print(f"Error: could not access transcripts for {video_id}: {exc}", file=sys.stderr)
         return 1
 
-    available = list(transcripts)
-    available_codes = [transcript.language_code for transcript in available]
-    if args.list_languages:
-        if not available:
-            print("No transcripts are available.")
-            return 0
-        for transcript in available:
-            kind = "generated" if transcript.is_generated else "manual"
-            print(f"{transcript.language_code}\t{transcript.language}\t{kind}")
-        return 0
-
-    selected = None
-    for code in requested:
-        selected = next((transcript for transcript in available if transcript.language_code == code), None)
-        if selected:
-            break
-    if selected is None and available:
-        selected = available[0]
-        if not args.quiet:
-            print(f"Requested language(s) {', '.join(requested)} unavailable; using {selected.language_code}.", file=sys.stderr)
-    if selected is None:
+    if not fetched:
         print(f"Error: no transcripts are available for {video_id}.", file=sys.stderr)
-        return 1
-
-    try:
-        fetched = selected.fetch(preserve_formatting=True)
-    except Exception as exc:
-        print(f"Error: could not fetch the {selected.language_code} transcript: {exc}", file=sys.stderr)
         return 1
 
     output_format = args.format or ("srt" if args.timestamps else "txt")
@@ -152,3 +219,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
