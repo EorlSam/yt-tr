@@ -7,7 +7,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urljoin, urlparse, parse_qs
 
 
 @dataclass
@@ -21,6 +21,15 @@ def is_rumble_url(value: str) -> bool:
     """Return whether value is a Rumble URL."""
     parsed = urlparse(value)
     return parsed.scheme in {"http", "https"} and parsed.netloc.lower().split(":", 1)[0].endswith("rumble.com")
+
+
+def rumble_video_id_from(value: str) -> str:
+    """Extract the short Rumble video ID from a video URL."""
+    path = urlparse(value).path
+    match = re.search(r"/(v[0-9a-z]+)(?:[-/.?]|$)", path, re.IGNORECASE)
+    if not match:
+        raise ValueError("Rumble URL does not contain a video ID")
+    return match.group(1)
 
 
 def video_id_from(value: str) -> str:
@@ -111,12 +120,29 @@ def _vtt_time(value: str) -> float:
 
 
 def fetch_rumble_transcript(url: str, requested):
-    """Fetch a Rumble subtitle track through yt-dlp."""
+    """Fetch a Rumble subtitle track through Rumble's embed metadata API."""
     from yt_dlp import YoutubeDL
 
-    with YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True}) as ydl:
-        info = ydl.extract_info(url, download=False)
-        tracks = info.get("subtitles") or info.get("automatic_captions") or {}
+    video_id = rumble_video_id_from(url)
+    metadata_url = (
+        "https://rumble.com/embedJS/u3/?request=video&ver=2&v="
+        + video_id
+    )
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://rumble.com/",
+        },
+    }
+    with YoutubeDL(options) as ydl:
+        info = json.loads(ydl.urlopen(metadata_url).read().decode("utf-8"))
+        tracks = {
+            language: [{"url": urljoin("https://rumble.com/", details["path"]), "ext": "vtt"}]
+            for language, details in (info.get("cc") or {}).items()
+            if details.get("path")
+        }
         selected_code = next((code for code in requested if code in tracks), None)
         if selected_code is None and tracks:
             selected_code = next(iter(tracks))
