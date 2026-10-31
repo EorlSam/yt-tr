@@ -119,7 +119,7 @@ def _vtt_time(value: str) -> float:
     raise ValueError(value)
 
 
-def fetch_rumble_transcript(url: str, requested):
+def fetch_rumble_transcript(url: str, requested, cookies_from_browser=None):
     """Fetch a Rumble subtitle track through Rumble's embed metadata API."""
     from yt_dlp import YoutubeDL
 
@@ -136,6 +136,8 @@ def fetch_rumble_transcript(url: str, requested):
             "Referer": "https://rumble.com/",
         },
     }
+    if cookies_from_browser:
+        options["cookiesfrombrowser"] = (cookies_from_browser,)
     with YoutubeDL(options) as ydl:
         info = json.loads(ydl.urlopen(metadata_url).read().decode("utf-8"))
         tracks = {
@@ -168,6 +170,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-o", "--output", metavar="FILE", help="Save to an explicit output path (implies --save)")
     parser.add_argument("--force", action="store_true", help="Overwrite an existing output file")
     parser.add_argument("--list-languages", action="store_true", help="List available transcript languages and exit")
+    parser.add_argument("--cookies-from-browser", metavar="BROWSER", help="Use cookies from a browser (for example: chrome, edge, or firefox)")
     parser.add_argument("-q", "--quiet", action="store_true", help="Suppress save/status messages")
     return parser
 
@@ -184,7 +187,7 @@ def main() -> int:
     video_id = args.video if rumble else video_id_from(args.video)
     try:
         if rumble:
-            fetched, selected_code = fetch_rumble_transcript(args.video, requested)
+            fetched, selected_code = fetch_rumble_transcript(args.video, requested, args.cookies_from_browser)
             available_codes = [selected_code] if selected_code else []
         else:
             from youtube_transcript_api import YouTubeTranscriptApi
